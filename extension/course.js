@@ -4,6 +4,10 @@
   if (window.top !== window || !location.pathname.startsWith('/mycourse/studentstudy')) return;
 
   const STORAGE_KEY = 'courseAssistantRunning';
+  const SKIP_TEST_KEY = 'courseAssistantSkipTests';
+  let skipChapterTests = sessionStorage.getItem(SKIP_TEST_KEY) !== 'false';
+  // 预留大模型答题开关；实现前保持关闭，不发起模型请求。
+  const useModelForTests = false;
   const courseId = new URLSearchParams(location.search).get('courseId');
   const TAB_KEY = 'courseAssistantTabId';
   const tabId = sessionStorage.getItem(TAB_KEY) || crypto.randomUUID();
@@ -37,6 +41,7 @@
   let quizSubmittedProgress = 0;
   let quizContinued = false;
   let navigationSince = 0;
+  let navigationConfirmed = false;
   let navigationSignature = '';
   let cardSignature = '';
   let cardReadyAt = 0;
@@ -47,8 +52,16 @@
   box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:260px;padding:12px 14px;background:#fff;color:#172033;border:1px solid #b7c7da;border-radius:10px;box-shadow:0 4px 18px #0003;font:14px/1.5 sans-serif';
   box.innerHTML = '<strong>课程顺序播放助手</strong><div id="course-assistant-status" style="margin:8px 0;word-break:break-word"></div><button id="course-assistant-toggle" type="button" style="border:0;border-radius:6px;padding:6px 14px;background:#2878d0;color:white;cursor:pointer">开始</button>';
   document.documentElement.appendChild(box);
+  box.innerHTML += '<label style="display:block;margin-top:8px"><input id="course-assistant-skip-tests" type="checkbox"> 自动跳过测验</label><label style="display:block;margin-top:4px;color:#888"><input type="checkbox" disabled> 使用大模型自动答题（未实现）</label>';
   const status = box.querySelector('#course-assistant-status');
   const toggle = box.querySelector('#course-assistant-toggle');
+  // 独立设置区域，避免更新运行状态时覆盖开关。
+  const skipToggle = box.querySelector('#course-assistant-skip-tests');
+  skipToggle.checked = skipChapterTests;
+  skipToggle.addEventListener('change', () => {
+    skipChapterTests = skipToggle.checked;
+    sessionStorage.setItem(SKIP_TEST_KEY, String(skipChapterTests));
+  });
 
   function show(message) {
     status.textContent = message;
@@ -396,7 +409,13 @@
 
   async function handleDocument(container, frame, key) {
     resetTask(key);
-    if (!frameDocument(frame)) {
+    if (taskFinished(container)) {
+      currentTask = '';
+      show('文档任务点已完成，准备进入下一项…');
+      return;
+    }
+    const doc = frameDocument(frame);
+    if (!doc) {
       if (Date.now() - taskSince > LOAD_TIMEOUT_MS) await stop('文档加载超时，已暂停。');
       else show('等待文档加载…');
       return;
@@ -405,10 +424,43 @@
       await stop('文档尚未显示完成，需检查该文档的阅读要求。');
       return;
     }
-    show('文档已打开，等待平台确认任务点…');
+    // 仅遍历当前 PDF 的阅读区域，避免滚动课程目录或其他任务。
+    // 每轮重新检查高度，以覆盖延迟加载的页面和内嵌阅读器。
+    const pending = [doc];
+    const visited = new Set();
+    let scrollable = false;
+    while (pending.length && visited.size < 20) {
+      const reader = pending.shift();
+      if (visited.has(reader)) continue;
+      visited.add(reader);
+      for (const childFrame of reader.querySelectorAll('iframe')) {
+        const child = frameDocument(childFrame);
+        if (child) pending.push(child);
+      }
+      for (const node of reader.querySelectorAll('*')) {
+        if (node.clientHeight <= 0 || node.scrollHeight <= node.clientHeight + 1) continue;
+        const overflow = reader.defaultView.getComputedStyle(node).overflowY;
+        if (node !== reader.scrollingElement && !/^(auto|scroll|overlay)$/.test(overflow)) continue;
+        scrollable = true;
+        const bottom = node.scrollHeight - node.clientHeight;
+        if (node.scrollTop < bottom - 1) node.scrollTo({ top: bottom, behavior: 'instant' });
+      }
+    }
+    show(scrollable ? '已滚动至文档底部，等待平台确认任务点…' : '等待文档阅读区域加载及任务点确认…');
   }
 
-  async function advance() {
+  function isChapterTest(frame) {
+    if (frame.matches('.ans-insertvideo-online,.insertdoc-online-pdf')) return false;
+    if (frame.matches('.ans-insertwork-online')) return true;
+    try {
+      const path = new URL(frame.getAttribute('src') || '', location.href).pathname;
+      return /\/(?:mooc-ans\/)?work\/(?:index|doHomeWorkNew)(?:\.|\/|$)/i.test(path);
+    } catch {
+      return false;
+    }
+  }
+
+  async function advance(skippedTest = false) {
     const next = document.querySelector('#prevNextFocusNext');
     if (!next || !visible(next) || next.getAttribute('aria-disabled') === 'true') {
       await stop('已到最后一节；请核对课程总进度。', false);
@@ -417,12 +469,29 @@
     const frame = document.querySelector('#iframe');
     const signature = `${location.href}|${frame?.getAttribute('src') || ''}|${document.querySelector('li[id^="dct"].active')?.id || ''}`;
     if (navigationSignature === signature) {
+      if (skippedTest && skipChapterTests && !navigationConfirmed) {
+        for (const button of document.querySelectorAll('button,a,input[type="button"],[role="button"]')) {
+          if ((button.innerText || button.value || '').trim() !== '下一节' || !visible(button)) continue;
+          let parent = button.parentElement;
+          for (let depth = 0; parent && depth < 6; depth++, parent = parent.parentElement) {
+            const text = parent.innerText || '';
+            if (text.length > 500) break;
+            if (/当前章节还有任务点未完成[，,]\s*是否去完成[？?]/.test(text) && text.includes('去学习')) {
+              navigationConfirmed = true;
+              button.click();
+              show('已确认跳过未完成测验，等待下一节…');
+              return;
+            }
+          }
+        }
+      }
       if (Date.now() - navigationSince > LOAD_TIMEOUT_MS) await stop('切换后页面没有变化，已暂停。');
       return;
     }
     navigationSignature = signature;
+    navigationConfirmed = false;
     navigationSince = Date.now();
-    show('当前内容已完成，进入下一项…');
+    show(skippedTest ? '跳过章节测试（保留未完成状态），进入下一项…' : '当前内容已完成，进入下一项…');
     next.click();
   }
 
@@ -470,10 +539,19 @@
         show('等待当前内容加载完成…');
         return;
       }
+      const skippedTests = new Set();
       for (const container of containers) {
         const attachment = container.querySelector('iframe[jobid]');
         const key = `${location.pathname}|${frame.getAttribute('src')}|${attachment.getAttribute('jobid')}`;
         if (taskFinished(container) && currentTask !== key) continue;
+        if (isChapterTest(attachment)) {
+          if (!skipChapterTests || useModelForTests) {
+            await stop('遇到章节测验，自动跳过已关闭；请手动处理后继续。');
+            return;
+          }
+          skippedTests.add(container);
+          continue;
+        }
         if (attachment.matches('.ans-insertvideo-online')) {
           await handleVideo(container, attachment, key);
           return;
@@ -485,12 +563,13 @@
         await stop('遇到尚未支持的任务类型，已暂停。');
         return;
       }
-      if (card.querySelector('.ans-job-icon[aria-label="任务点未完成"]')) {
+      if ([...card.querySelectorAll('.ans-job-icon[aria-label="任务点未完成"]')]
+        .some(icon => !skippedTests.has(icon.closest('.ans-attach-ct')))) {
         await stop('当前内容还有未识别的任务点，已暂停。');
         return;
       }
       currentTask = '';
-      await advance();
+      await advance(skippedTests.size > 0);
     } catch (error) {
       await stop(`运行出错，已暂停：${error?.message || String(error)}`);
     } finally {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "学习通课程顺序播放助手",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "description": "按课程页面顺序播放视频并等待任务点完成，遇到异常立即暂停。",
   "permissions": ["storage"],
   "content_scripts": [
