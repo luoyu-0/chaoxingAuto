@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "学习通课程顺序播放助手",
+  "version": "0.3.0",
+  "description": "按课程页面顺序播放视频并等待任务点完成，遇到异常立即暂停。",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mooc1.chaoxing.com/*",
+        "https://mooc2-ans.chaoxing.com/*",
+        "https://passport2.chaoxing.com/*"
+      ],
+      "js": ["guard.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://mooc1.chaoxing.com/mycourse/studentstudy*"],
+      "js": ["course.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
