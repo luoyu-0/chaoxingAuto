@@ -53,6 +53,7 @@
   let hasPlayed = false;
   let backgroundResumes = 0;
   let stallRecovered = false;
+  let documentWaitReported = false;
   let manualPauseRequested = false;
   const watchedPlayers = new WeakSet();
   let endedAt = 0;
@@ -215,6 +216,7 @@
     hasPlayed = false;
     backgroundResumes = 0;
     stallRecovered = false;
+    documentWaitReported = false;
     manualPauseRequested = false;
     endedAt = 0;
     rateAttemptedAt = 0;
@@ -536,10 +538,6 @@
       else show('等待文档加载…');
       return;
     }
-    if (Date.now() - taskSince > DOCUMENT_TIMEOUT_MS) {
-      await stop('文档尚未显示完成，需检查该文档的阅读要求。');
-      return;
-    }
     // 仅遍历当前 PDF 的阅读区域，避免滚动课程目录或其他任务。
     // 每轮重新检查高度，以覆盖延迟加载的页面和内嵌阅读器。
     const pending = [doc];
@@ -561,6 +559,19 @@
         const bottom = node.scrollHeight - node.clientHeight;
         if (node.scrollTop < bottom - 1) node.scrollTo({ top: bottom, behavior: 'instant' });
       }
+    }
+    if (Date.now() - taskSince > DOCUMENT_TIMEOUT_MS) {
+      if (!scrollable) {
+        await stop('文档阅读区域未能加载，需检查该文档的阅读要求。');
+        return;
+      }
+      // 平台完成标记可能晚于阅读器滚动，不能停止轮询后错过该更新。
+      if (!documentWaitReported) {
+        documentWaitReported = true;
+        if (chrome.runtime?.sendMessage) void send('recordDocumentWait').catch(() => {});
+      }
+      show('文档已滚动到底，仍在等待平台确认；确认后自动继续，可手动暂停。');
+      return;
     }
     show(scrollable ? '已滚动至文档底部，等待平台确认任务点…' : '等待文档阅读区域加载及任务点确认…');
   }

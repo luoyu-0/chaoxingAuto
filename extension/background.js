@@ -17,7 +17,7 @@ function appendLog(entry) {
   return logOperation(async () => {
     const stored = (await chrome.storage.local.get(LOG_KEY))[LOG_KEY];
     const logs = Array.isArray(stored) ? stored : [];
-    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.7' };
+    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.8' };
     for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens', 'currentTime', 'readyState', 'networkState', 'mediaError', 'hidden', 'recovered']) {
       if (entry[key] !== undefined) safe[key] = ['number', 'boolean'].includes(typeof entry[key]) ? entry[key] : cleanLogText(entry[key]);
     }
@@ -66,6 +66,10 @@ async function dispatch(message, sender) {
   }
   if (message.type === 'recordPause') {
     await appendLog({ event: 'assistant_paused', reason: message.reason });
+    return {};
+  }
+  if (message.type === 'recordDocumentWait') {
+    await appendLog({ event: 'document_confirmation_delayed', reason: '文档可滚动，超过 90 秒仍等待平台完成标记' });
     return {};
   }
   if (message.type === 'recordVideoStall') {

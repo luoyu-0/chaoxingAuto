@@ -5,19 +5,21 @@ const vm = require('node:vm');
 
 async function main() {
   const status = {};
+  let now = 1000;
   const box = { style: {}, querySelector: selector => selector.includes('status') ? status : { addEventListener() {} } };
   const window = { setInterval() {}, clearInterval() {} };
   window.top = window;
   const context = {
+    Date: class extends Date { static now() { return now; } },
     window,
-    document: { createElement: () => box, documentElement: { appendChild() {} }, addEventListener() {} },
+    document: { querySelectorAll: () => [], createElement: () => box, documentElement: { appendChild() {} }, addEventListener() {} },
     location: { pathname: '/mycourse/studentstudy', search: '?courseId=1' },
     sessionStorage: { getItem: () => 'tab', setItem() {} },
     URLSearchParams,
     chrome: { storage: { local: { get: async () => ({}) }, onChanged: { addListener() {} } } },
   };
   const source = fs.readFileSync(path.join(__dirname, '../extension/course.js'), 'utf8')
-    .replace(/\n\}\)\(\);\s*$/, '\n globalThis.test = { taskFinished, handleDocument, current: () => currentTask };\n})();');
+    .replace(/\n\}\)\(\);\s*$/, '\n globalThis.test = { start: () => { running = true; }, running: () => running, taskFinished, handleDocument, current: () => currentTask };\n})();');
   vm.runInNewContext(source, context);
   await Promise.resolve();
   const completedParent = { classList: { contains: name => name === 'ans-job-finished' } };
@@ -28,6 +30,7 @@ async function main() {
   assert.equal(context.test.taskFinished(textContainer), true, '完成文字应兼容未同步的 aria-label');
   textMarker.textContent = '任务点';
   assert.equal(context.test.taskFinished(textContainer), false, '未完成任务不能因文档到底就放行');
+  context.test.start();
   let finished = false;
   let scrolls = 0;
   const viewport = {
@@ -50,6 +53,13 @@ async function main() {
   await context.test.handleDocument(container, frame, 'pdf');
   assert.equal(viewport.scrollTop, 3600, '应继续滚动延迟加载新增的页面');
   assert.equal(context.test.current(), 'pdf', '滚动到底不能当作平台已确认完成');
+  now += 91000;
+  await context.test.handleDocument(container, frame, 'pdf');
+  assert.match(status.textContent, /仍在等待平台确认/, '超时后必须继续观察，不能永久停止');
+  assert.equal(context.test.running(), true, '等待过程中助手应保持运行以接收完成更新');
+  now += 180000;
+  await context.test.handleDocument(container, frame, 'pdf');
+  assert.equal(context.test.running(), true);
   finished = true;
   await context.test.handleDocument(container, frame, 'pdf');
   assert.equal(context.test.current(), '', '平台确认完成后应释放当前任务，允许继续');
