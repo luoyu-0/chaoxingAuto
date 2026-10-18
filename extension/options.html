@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>课程助手设置</title><link rel="stylesheet" href="options.css"></head>
+<body><main><h1>课程助手设置</h1><p>配置 OpenAI 兼容接口。题目只发送到你配置的服务，不包含课程登录凭据。</p>
+<form id="settings">
+<label>服务预设<select id="preset"><option value="deepseek">DeepSeek 官方</option><option value="custom">自定义兼容接口</option></select></label>
+<label>Base URL<input id="baseUrl" type="url" required placeholder="https://api.deepseek.com"></label>
+<label>模型名称<input id="model" maxlength="150" placeholder="填写服务商提供的模型 ID"></label>
+<label>API Key<input id="key" type="password" autocomplete="off" placeholder="留空保留现有密钥"></label>
+<label class="inline"><input id="showKey" type="checkbox">显示输入的密钥</label>
+<label class="inline"><input id="rememberKey" type="checkbox">保存密钥到本机（扩展存储并非加密保险箱）</label>
+<p id="keyStatus"></p><button id="clearKey" type="button">清除已保存密钥</button>
+<label class="inline"><input id="jsonMode" type="checkbox" checked>使用 JSON 输出模式（DeepSeek 支持；其他服务不兼容时可关闭）</label>
+<hr><label class="inline"><input id="skipTests" type="checkbox" checked>自动跳过测验</label>
+<label>关闭跳过后，遇到测验时<select id="mode"><option value="pause">暂停</option><option value="manual">自动填写，手动确认提交</option><option value="auto">自动填写，自动提交</option></select></label>
+<p>选择自动填写模式会关闭自动跳过。已有作答冲突、题目读取不全或提交结果不明确时暂停，不重复交卷。</p>
+<div class="actions"><button type="submit">保存设置</button><button id="test" type="button">保存并测试连接</button></div>
+</form><p id="status" role="status" aria-live="polite"></p></main><script src="model-api.js"></script><script src="options.js"></script></body></html>

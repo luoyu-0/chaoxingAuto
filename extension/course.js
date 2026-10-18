@@ -6,8 +6,16 @@
   const STORAGE_KEY = 'courseAssistantRunning';
   const SKIP_TEST_KEY = 'courseAssistantSkipTests';
   let skipChapterTests = sessionStorage.getItem(SKIP_TEST_KEY) !== 'false';
-  // 预留大模型答题开关；实现前保持关闭，不发起模型请求。
-  const useModelForTests = false;
+  let testMode = 'pause';
+  async function send(type, data = {}) {
+    const result = await chrome.runtime.sendMessage({ type, ...data });
+    if (!result?.ok) throw new Error(result?.error || '扩展后台未响应，请重新开始');
+    return result.data;
+  }
+  const ownerStorage = chrome.runtime?.sendMessage ? {
+    get: async () => ({ [STORAGE_KEY]: await send('getOwner') }),
+    set: async data => send('setOwner', { owner: data[STORAGE_KEY] }),
+  } : chrome.storage.local;
   const courseId = new URLSearchParams(location.search).get('courseId');
   const TAB_KEY = 'courseAssistantTabId';
   const tabId = sessionStorage.getItem(TAB_KEY) || crypto.randomUUID();
@@ -52,20 +60,50 @@
   box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:260px;padding:12px 14px;background:#fff;color:#172033;border:1px solid #b7c7da;border-radius:10px;box-shadow:0 4px 18px #0003;font:14px/1.5 sans-serif';
   box.innerHTML = '<strong>课程顺序播放助手</strong><div id="course-assistant-status" style="margin:8px 0;word-break:break-word"></div><button id="course-assistant-toggle" type="button" style="border:0;border-radius:6px;padding:6px 14px;background:#2878d0;color:white;cursor:pointer">开始</button>';
   document.documentElement.appendChild(box);
-  box.innerHTML += '<label style="display:block;margin-top:8px"><input id="course-assistant-skip-tests" type="checkbox"> 自动跳过测验</label><label style="display:block;margin-top:4px;color:#888"><input type="checkbox" disabled> 使用大模型自动答题（未实现）</label>';
+  box.innerHTML += '<label style="display:block;margin-top:8px"><input id="course-assistant-skip-tests" type="checkbox"> 自动跳过测验</label><label style="display:block;margin-top:6px">测验处理<select id="course-assistant-test-mode" style="width:100%"><option value="pause">遇到测验暂停</option><option value="manual">自动填写，手动确认</option><option value="auto">自动填写，自动提交</option></select></label><button id="course-assistant-settings" type="button" style="margin-top:8px">API 设置</button><button id="course-assistant-submit" type="button" hidden>确认提交并继续</button>';
+  box.innerHTML += '<button id="course-assistant-inspect" type="button" style="margin-top:8px">检查测验结构</button>';
   const status = box.querySelector('#course-assistant-status');
   const toggle = box.querySelector('#course-assistant-toggle');
   // 独立设置区域，避免更新运行状态时覆盖开关。
   const skipToggle = box.querySelector('#course-assistant-skip-tests');
+  const modeSelect = box.querySelector('#course-assistant-test-mode');
+  const submitToggle = box.querySelector('#course-assistant-submit');
+  const chapterTests = globalThis.CourseChapterTest?.create({ send, show, pause: message => stop(message), allowed: () => running && !!activeTestFrame?.isConnected && !allDocuments().some(riskIn), allDocs: allDocuments });
+  let activeTestFrame = null;
+  function syncBehavior(data) {
+    if (testMode !== data.mode || skipChapterTests !== data.skipTests) chapterTests?.cancel();
+    testMode = data.mode; skipChapterTests = data.skipTests;
+    modeSelect.value = testMode; skipToggle.checked = skipChapterTests;
+  }
+  async function saveBehavior() {
+    try { syncBehavior(await send('setBehavior', { mode: modeSelect.value, skipTests: skipToggle.checked })); }
+    catch (error) { await stop(error.message); }
+  }
+  modeSelect.addEventListener('change', () => { if (modeSelect.value !== 'pause') skipToggle.checked = false; void saveBehavior(); });
+  box.querySelector('#course-assistant-settings').addEventListener('click', () => void send('openSettings').catch(error => show(error.message)));
+  box.querySelector('#course-assistant-inspect').addEventListener('click', () => {
+    if (running) { show('请先暂停，再检查测验结构。'); return; }
+    try {
+      const frames = allDocuments().flatMap(doc => [...doc.querySelectorAll('iframe')]).filter(isChapterTest);
+      if (!frames.length) throw new Error('请先在当前章节切换到章节测试');
+      const snapshot = CourseChapterTest.extract(frames[0]);
+      const counts = snapshot.questions.reduce((acc, q) => { acc[q.type] = (acc[q.type] || 0) + 1; return acc; }, {});
+      CourseChapterTest.submitButton(snapshot.doc);
+      show(`测验结构检查通过：${snapshot.questions.length} 题（单选 ${counts.single_choice || 0}、多选 ${counts.multiple_choice || 0}、判断 ${counts.true_false || 0}），提交按钮已识别。未调用模型或填写答案。`);
+    } catch (error) { show(`测验结构检查：${error.message}`); }
+  });
+  submitToggle.addEventListener('click', () => { if (running && chapterTests?.approve()) void tick(); });
   skipToggle.checked = skipChapterTests;
   skipToggle.addEventListener('change', () => {
     skipChapterTests = skipToggle.checked;
     sessionStorage.setItem(SKIP_TEST_KEY, String(skipChapterTests));
+    if (chrome.runtime?.sendMessage) { if (skipToggle.checked) modeSelect.value = 'pause'; void saveBehavior(); }
   });
 
   function show(message) {
     status.textContent = message;
     toggle.textContent = running ? '暂停' : '开始';
+    if (submitToggle) submitToggle.hidden = !running || !chapterTests?.waiting();
   }
 
   function frameDocument(frame) {
@@ -88,6 +126,7 @@
     const body = doc.body;
     if (RISK_TEXT.test(title)) return true;
     if (body && body.innerText.length < 1400 && RISK_TEXT.test(body.innerText)) return true;
+    if (visible(doc.querySelector('#verifyCodeWin'))) return true;
     for (const node of doc.querySelectorAll('[role="dialog"],.layui-layer,.modal,.popup,.verify,.captcha')) {
       if (visible(node) && RISK_TEXT.test(node.innerText || '')) return true;
     }
@@ -140,10 +179,11 @@
 
   async function stop(message, pause = true) {
     running = false;
+    chapterTests?.cancel();
     try {
-      const data = await chrome.storage.local.get(STORAGE_KEY);
+      const data = await ownerStorage.get(STORAGE_KEY);
       if (data[STORAGE_KEY]?.tabId === tabId) {
-        await chrome.storage.local.set({ [STORAGE_KEY]: null });
+        await ownerStorage.set({ [STORAGE_KEY]: null });
       }
     } catch (error) {
       storageFailed(error);
@@ -509,6 +549,14 @@
     busy = true;
     try {
       const docs = allDocuments();
+      if (chrome.runtime?.sendMessage) {
+        const owner = (await ownerStorage.get(STORAGE_KEY))[STORAGE_KEY];
+        if (!owner || owner.tabId !== tabId || owner.courseId !== courseId) {
+          running = false; chapterTests?.cancel(); pauseVideos(); show('运行状态已改变，本页已暂停。'); return;
+        }
+        syncBehavior(await send('getConfig'));
+      }
+      if (activeTestFrame && !activeTestFrame.isConnected) { chapterTests?.cancel(); activeTestFrame = null; }
       if (docs.some(riskIn)) {
         await stop('检测到登录或风控验证提示，已立即停止。');
         return;
@@ -545,8 +593,15 @@
         const key = `${location.pathname}|${frame.getAttribute('src')}|${attachment.getAttribute('jobid')}`;
         if (taskFinished(container) && currentTask !== key) continue;
         if (isChapterTest(attachment)) {
-          if (!skipChapterTests || useModelForTests) {
-            await stop('遇到章节测验，自动跳过已关闭；请手动处理后继续。');
+          if (!skipChapterTests) {
+            if (testMode === 'pause') { await stop('遇到章节测验，已按设置暂停。'); return; }
+            if (!chapterTests) { await stop('测验模块未加载，请刷新课程页。'); return; }
+            resetTask(key);
+            activeTestFrame = attachment;
+            const chapterId = new URLSearchParams(location.search).get('chapterId');
+            const testKey = `${courseId}:${chapterId}:${attachment.getAttribute('jobid')}`;
+            const outcome = await chapterTests.step(attachment, testKey, testMode, taskFinished(container));
+            if (outcome === 'done') { currentTask = ''; activeTestFrame = null; continue; }
             return;
           }
           skippedTests.add(container);
@@ -584,7 +639,7 @@
     }
     running = true;
     try {
-      await chrome.storage.local.set({ [STORAGE_KEY]: { courseId, tabId } });
+      await ownerStorage.set({ [STORAGE_KEY]: { courseId, tabId } });
     } catch (error) {
       storageFailed(error);
       return;
@@ -604,7 +659,7 @@
         show('已在另一个标签页启动，本页已暂停。');
       }
     });
-    chrome.storage.local.get(STORAGE_KEY).then(data => {
+    ownerStorage.get(STORAGE_KEY).then(data => {
       running = !!courseId && data[STORAGE_KEY]?.courseId === courseId && data[STORAGE_KEY]?.tabId === tabId;
       show(running ? '已恢复，正在检查当前章节…' : '已暂停；从当前章节开始。');
       if (running) void tick();
