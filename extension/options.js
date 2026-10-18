@@ -35,3 +35,15 @@ $('settings').addEventListener('submit', e => { e.preventDefault(); void action(
 $('test').addEventListener('click', () => void action(async () => { await save(); $('status').textContent = '正在测试，将产生一次小额 API 调用…'; const result = await send('testConnection'); $('status').textContent = result.message; }));
 $('clearKey').addEventListener('click', () => void action(async () => { await save(true); $('status').textContent = '密钥已清除。'; }));
 send('getConfig').then(display).catch(e => { $('status').textContent = e.message; });
+$('exportLogs').addEventListener('click', () => void action(async () => {
+  const data = await send('getLogs');
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = `course-assistant-logs-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $('status').textContent = `已导出 ${data.logs.length} 条日志。`;
+}));
+$('clearLogs').addEventListener('click', () => void action(async () => {
+  await send('clearLogs'); $('status').textContent = '已有日志已清理，后续运行会继续记录。';
+}));

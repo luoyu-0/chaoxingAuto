@@ -51,3 +51,18 @@ test('未启动助手或第三方网页不能发起付费模型调用', async ()
   assert.equal((await f.send('getConfig', {}, { ...f.course, url: 'https://other.test' })).ok, false);
   assert.equal(f.requests(), 0);
 });
+
+test('日志持久保存、并发不丢失、容量有限且只允许设置页读取清理', async () => {
+  const f = setup();
+  await Promise.all(Array.from({ length: 505 }, (_, i) => f.send('recordPause', { reason: `暂停 ${i} https://example.test/?token=private sk-test-secret` }, f.course)));
+  const result = await f.send('getLogs');
+  assert.equal(result.data.logs.length, 500);
+  assert.equal(f.stores.local.diagnosticLogs.length, 500);
+  assert.match(result.data.logs[0].reason, /暂停 5 /);
+  assert.equal(JSON.stringify(result).includes('private'), false);
+  assert.equal(JSON.stringify(result).includes('sk-test-secret'), false);
+  assert.equal((await f.send('getLogs', {}, f.course)).ok, false);
+  assert.equal((await f.send('clearLogs', {}, f.course)).ok, false);
+  await f.send('clearLogs');
+  assert.equal((await f.send('getLogs')).data.logs.length, 0);
+});

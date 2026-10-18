@@ -74,7 +74,7 @@
   box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:260px;padding:12px 14px;background:#fff;color:#172033;border:1px solid #b7c7da;border-radius:10px;box-shadow:0 4px 18px #0003;font:14px/1.5 sans-serif';
   box.innerHTML = '<strong>课程顺序播放助手</strong><div id="course-assistant-status" style="margin:8px 0;word-break:break-word"></div><button id="course-assistant-toggle" type="button" style="border:0;border-radius:6px;padding:6px 14px;background:#2878d0;color:white;cursor:pointer">开始</button>';
   document.documentElement.appendChild(box);
-  box.innerHTML += '<label style="display:block;margin-top:10px">测验处理<select id="course-assistant-test-mode"><option value="skip">自动跳过测验</option><option value="pause">遇到测验暂停</option><option value="manual">自动填写，手动确认</option><option value="auto">自动填写，自动提交</option></select></label><div class="course-assistant-actions"><button id="course-assistant-settings" type="button">API 设置</button><button id="course-assistant-inspect" type="button">检查测验结构</button></div><button id="course-assistant-submit" type="button" hidden>确认提交并继续</button>';
+  box.innerHTML += '<label style="display:block;margin-top:10px">测验处理<select id="course-assistant-test-mode"><option value="skip">自动跳过测验</option><option value="pause">遇到测验暂停</option><option value="manual">自动填写，手动确认</option><option value="auto">自动填写，自动提交</option></select></label><div class="course-assistant-actions"><button id="course-assistant-settings" type="button">设置</button><button id="course-assistant-inspect" type="button">检查测验结构</button></div><button id="course-assistant-submit" type="button" hidden>确认提交并继续</button>';
   const status = box.querySelector('#course-assistant-status');
   const toggle = box.querySelector('#course-assistant-toggle');
   // 独立设置区域，避免更新运行状态时覆盖开关。
@@ -187,6 +187,7 @@
 
   async function stop(message, pause = true) {
     running = false;
+    if (chrome.runtime?.sendMessage) void send('recordPause', { reason: message }).catch(() => {});
     // 刷新后仍可查到最近一次停止原因，不记录课程地址或登录参数。
     try { sessionStorage.setItem('courseAssistantLastPause', JSON.stringify({ time: new Date().toISOString(), message })); } catch {}
     chapterTests?.cancel();

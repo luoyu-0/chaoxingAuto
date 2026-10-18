@@ -3,6 +3,27 @@ importScripts('model-api.js');
 const CONFIG = 'modelConfig';
 const SECRET = 'modelSecret';
 const active = new Map();
+const LOG_KEY = 'diagnosticLogs';
+let logQueue = Promise.resolve();
+function logOperation(operation) {
+  const result = logQueue.then(operation);
+  logQueue = result.catch(() => {});
+  return result;
+}
+function cleanLogText(value) {
+  return String(value || '').replace(/https?:\/\/\S+/gi, '[地址已隐藏]').replace(/\b(?:sk-[\w-]+|Bearer\s+\S+)/gi, '[密钥已隐藏]').slice(0, 400);
+}
+function appendLog(entry) {
+  return logOperation(async () => {
+    const stored = (await chrome.storage.local.get(LOG_KEY))[LOG_KEY];
+    const logs = Array.isArray(stored) ? stored : [];
+    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.5' };
+    for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens']) {
+      if (entry[key] !== undefined) safe[key] = typeof entry[key] === 'number' ? entry[key] : cleanLogText(entry[key]);
+    }
+    await chrome.storage.local.set({ [LOG_KEY]: [...logs, safe].slice(-500) });
+  });
+}
 const ready = Promise.all([
   chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
@@ -36,6 +57,17 @@ async function dispatch(message, sender) {
     return {};
   }
   if (!fromSettings && !courseSender(sender)) throw new Error('不支持的调用页面');
+  if (['getLogs', 'clearLogs'].includes(message.type)) {
+    if (!fromSettings) throw new Error('只有设置页可以读取或清理日志');
+    return logOperation(async () => {
+      if (message.type === 'clearLogs') { await chrome.storage.local.remove(LOG_KEY); return {}; }
+      return { logs: (await chrome.storage.local.get(LOG_KEY))[LOG_KEY] || [] };
+    });
+  }
+  if (message.type === 'recordPause') {
+    await appendLog({ event: 'assistant_paused', reason: message.reason });
+    return {};
+  }
   if (message.type === 'openSettings') { await chrome.runtime.openOptionsPage(); return {}; }
   if (message.type === 'getConfig') {
     const c = await config();
@@ -105,7 +137,11 @@ async function call(c, qs, controller = new AbortController()) {
   if (!await chrome.permissions.contains({ origins: [origin] })) throw new Error('请在设置页授权 API 地址的访问权限');
   const key = await secret(c);
   const timeout = setTimeout(() => controller.abort(), 120000);
-  try { return await CourseModel.request(c, key, qs, { signal: controller.signal }); }
+  try { return await CourseModel.request(c, key, qs, { signal: controller.signal, onEvent: appendLog }); }
+  catch (error) {
+    await appendLog({ event: 'request_failed', reason: error.message, questionCount: qs.length }).catch(() => {});
+    throw error;
+  }
   finally { clearTimeout(timeout); }
 }
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
