@@ -1,0 +1,39 @@
+#course-assistant-panel select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 5px;
+  padding: 7px 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #172033;
+  font: inherit;
+}
+#course-assistant-panel .course-assistant-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+#course-assistant-panel .course-assistant-actions button,
+#course-assistant-submit {
+  flex: 1;
+  padding: 7px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font: inherit;
+  cursor: pointer;
+}
+#course-assistant-submit { margin-top: 10px; }
+#course-assistant-panel .course-assistant-actions button:hover,
+#course-assistant-submit:hover {
+  background: #eff6ff;
+  border-color: #93b4df;
+  color: #1d4f91;
+}
+#course-assistant-panel button:focus-visible,
+#course-assistant-panel select:focus-visible {
+  outline: 2px solid #2878d0;
+  outline-offset: 2px;
+}

@@ -8,7 +8,18 @@
   let skipChapterTests = sessionStorage.getItem(SKIP_TEST_KEY) !== 'false';
   let testMode = 'pause';
   async function send(type, data = {}) {
-    const result = await chrome.runtime.sendMessage({ type, ...data });
+    let result;
+    // 后台暂时退出时，只读查询可以安全重试；付费请求和写操作不能重放。
+    for (let attempt = 0; ; attempt++) {
+      try {
+        result = await chrome.runtime.sendMessage({ type, ...data });
+        break;
+      } catch (error) {
+        const temporary = /message (?:port|channel) closed|receiving end does not exist|could not establish connection|message channel closed before a response/i.test(error?.message || '');
+        if (!['getOwner', 'getConfig'].includes(type) || !temporary || attempt >= 2) throw error;
+        await new Promise(resolve => window.setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    }
     if (!result?.ok) throw new Error(result?.error || '扩展后台未响应，请重新开始');
     return result.data;
   }
@@ -40,6 +51,9 @@
   let lastProgressAt = 0;
   let playRequestedAt = 0;
   let hasPlayed = false;
+  let backgroundResumes = 0;
+  let manualPauseRequested = false;
+  const watchedPlayers = new WeakSet();
   let endedAt = 0;
   let rateAttemptedAt = 0;
   let rateChecked = false;
@@ -60,12 +74,10 @@
   box.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:260px;padding:12px 14px;background:#fff;color:#172033;border:1px solid #b7c7da;border-radius:10px;box-shadow:0 4px 18px #0003;font:14px/1.5 sans-serif';
   box.innerHTML = '<strong>课程顺序播放助手</strong><div id="course-assistant-status" style="margin:8px 0;word-break:break-word"></div><button id="course-assistant-toggle" type="button" style="border:0;border-radius:6px;padding:6px 14px;background:#2878d0;color:white;cursor:pointer">开始</button>';
   document.documentElement.appendChild(box);
-  box.innerHTML += '<label style="display:block;margin-top:8px"><input id="course-assistant-skip-tests" type="checkbox"> 自动跳过测验</label><label style="display:block;margin-top:6px">测验处理<select id="course-assistant-test-mode" style="width:100%"><option value="pause">遇到测验暂停</option><option value="manual">自动填写，手动确认</option><option value="auto">自动填写，自动提交</option></select></label><button id="course-assistant-settings" type="button" style="margin-top:8px">API 设置</button><button id="course-assistant-submit" type="button" hidden>确认提交并继续</button>';
-  box.innerHTML += '<button id="course-assistant-inspect" type="button" style="margin-top:8px">检查测验结构</button>';
+  box.innerHTML += '<label style="display:block;margin-top:10px">测验处理<select id="course-assistant-test-mode"><option value="skip">自动跳过测验</option><option value="pause">遇到测验暂停</option><option value="manual">自动填写，手动确认</option><option value="auto">自动填写，自动提交</option></select></label><div class="course-assistant-actions"><button id="course-assistant-settings" type="button">API 设置</button><button id="course-assistant-inspect" type="button">检查测验结构</button></div><button id="course-assistant-submit" type="button" hidden>确认提交并继续</button>';
   const status = box.querySelector('#course-assistant-status');
   const toggle = box.querySelector('#course-assistant-toggle');
   // 独立设置区域，避免更新运行状态时覆盖开关。
-  const skipToggle = box.querySelector('#course-assistant-skip-tests');
   const modeSelect = box.querySelector('#course-assistant-test-mode');
   const submitToggle = box.querySelector('#course-assistant-submit');
   const chapterTests = globalThis.CourseChapterTest?.create({ send, show, pause: message => stop(message), allowed: () => running && !!activeTestFrame?.isConnected && !allDocuments().some(riskIn), allDocs: allDocuments });
@@ -73,13 +85,14 @@
   function syncBehavior(data) {
     if (testMode !== data.mode || skipChapterTests !== data.skipTests) chapterTests?.cancel();
     testMode = data.mode; skipChapterTests = data.skipTests;
-    modeSelect.value = testMode; skipToggle.checked = skipChapterTests;
+    modeSelect.value = skipChapterTests ? 'skip' : testMode;
+    sessionStorage.setItem(SKIP_TEST_KEY, String(skipChapterTests));
   }
   async function saveBehavior() {
-    try { syncBehavior(await send('setBehavior', { mode: modeSelect.value, skipTests: skipToggle.checked })); }
+    try { syncBehavior(await send('setBehavior', { mode: modeSelect.value === 'skip' ? 'pause' : modeSelect.value, skipTests: modeSelect.value === 'skip' })); }
     catch (error) { await stop(error.message); }
   }
-  modeSelect.addEventListener('change', () => { if (modeSelect.value !== 'pause') skipToggle.checked = false; void saveBehavior(); });
+  modeSelect.addEventListener('change', () => { void saveBehavior(); });
   box.querySelector('#course-assistant-settings').addEventListener('click', () => void send('openSettings').catch(error => show(error.message)));
   box.querySelector('#course-assistant-inspect').addEventListener('click', () => {
     if (running) { show('请先暂停，再检查测验结构。'); return; }
@@ -93,12 +106,7 @@
     } catch (error) { show(`测验结构检查：${error.message}`); }
   });
   submitToggle.addEventListener('click', () => { if (running && chapterTests?.approve()) void tick(); });
-  skipToggle.checked = skipChapterTests;
-  skipToggle.addEventListener('change', () => {
-    skipChapterTests = skipToggle.checked;
-    sessionStorage.setItem(SKIP_TEST_KEY, String(skipChapterTests));
-    if (chrome.runtime?.sendMessage) { if (skipToggle.checked) modeSelect.value = 'pause'; void saveBehavior(); }
-  });
+  modeSelect.value = skipChapterTests ? 'skip' : testMode;
 
   function show(message) {
     status.textContent = message;
@@ -179,6 +187,8 @@
 
   async function stop(message, pause = true) {
     running = false;
+    // 刷新后仍可查到最近一次停止原因，不记录课程地址或登录参数。
+    try { sessionStorage.setItem('courseAssistantLastPause', JSON.stringify({ time: new Date().toISOString(), message })); } catch {}
     chapterTests?.cancel();
     try {
       const data = await ownerStorage.get(STORAGE_KEY);
@@ -201,6 +211,8 @@
     lastProgressAt = Date.now();
     playRequestedAt = 0;
     hasPlayed = false;
+    backgroundResumes = 0;
+    manualPauseRequested = false;
     endedAt = 0;
     rateAttemptedAt = 0;
     rateChecked = false;
@@ -377,6 +389,21 @@
       else show('等待视频播放器加载…');
       return;
     }
+    if (!watchedPlayers.has(playerDoc)) {
+      watchedPlayers.add(playerDoc);
+      const noticeManualPause = event => {
+        if (!event.isTrusted) return;
+        const currentVideo = playerDoc.querySelector('video');
+        if (!currentVideo || currentVideo.paused) return;
+        const playbackControl = event.target?.closest?.('video,.vjs-play-control,.vjs-tech');
+        const typing = event.target?.closest?.('input,textarea,select,[contenteditable="true"]');
+        if (playbackControl || (!typing && event.type === 'keydown' && [' ', 'k', 'K', 'MediaPlayPause'].includes(event.key))) {
+          manualPauseRequested = true;
+        }
+      };
+      playerDoc.addEventListener('pointerdown', noticeManualPause, true);
+      playerDoc.addEventListener('keydown', noticeManualPause, true);
+    }
 
     frame.scrollIntoView({ block: 'center' });
     const quiz = visibleQuiz(playerDoc);
@@ -409,6 +436,20 @@
     if (video.paused) {
       if (hasPlayed) {
         const away = document.visibilityState === 'hidden' || !document.hasFocus();
+        const popup = allDocuments().some(doc => [...doc.querySelectorAll('[role="dialog"],.layui-layer,.modal,.popup,.vjs-modal-dialog,#workpop,#verifyCodeWin')].some(visible));
+        if (away && !manualPauseRequested && !video.error && !popup && !allDocuments().some(riskIn) && backgroundResumes < 2) {
+          backgroundResumes++;
+          show(`后台视频意外暂停，正在尝试续播（${backgroundResumes}/2）…`);
+          try {
+            await video.play();
+            if (!running) { video.pause(); return; }
+            lastProgressAt = Date.now();
+            lastProgress = video.currentTime;
+            if (!video.paused) return;
+          } catch {
+            // 自动播放被拒绝时保留原有暂停提示，不反复调用播放。
+          }
+        }
         await stop(away
           ? '视频已暂停，当前页面处于隐藏或失焦状态。请返回课程页，手动播放后点击“开始”。'
           : '视频在结束前暂停，当前页面仍有焦点。请检查播放器提示，手动播放后点击“开始”。');
@@ -431,6 +472,7 @@
     }
 
     playRequestedAt = 0;
+    manualPauseRequested = false;
     hasPlayed = true;
     preferDoubleSpeed(playerDoc, video);
     if (video.currentTime + 2 < lastProgress) {
@@ -638,6 +680,7 @@
       return;
     }
     running = true;
+    resetTask('');
     try {
       await ownerStorage.set({ [STORAGE_KEY]: { courseId, tabId } });
     } catch (error) {
@@ -661,7 +704,14 @@
     });
     ownerStorage.get(STORAGE_KEY).then(data => {
       running = !!courseId && data[STORAGE_KEY]?.courseId === courseId && data[STORAGE_KEY]?.tabId === tabId;
-      show(running ? '已恢复，正在检查当前章节…' : '已暂停；从当前章节开始。');
+      let lastPause = '';
+      if (!running) {
+        try {
+          const record = JSON.parse(sessionStorage.getItem('courseAssistantLastPause'));
+          if (typeof record?.message === 'string') lastPause = ` 上次停止原因：${record.message}`;
+        } catch {}
+      }
+      show(running ? '已恢复，正在检查当前章节…' : `已暂停；从当前章节开始。${lastPause}`);
       if (running) void tick();
     }).catch(storageFailed);
   } catch (error) {
