@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 async function fixture() {
-  let plays = 0, popup = false;
+  let plays = 0, popup = false, now = 1000;
   const listeners = {}, status = {}, control = { addEventListener() {} };
   const box = { style: {}, querySelector: s => s.includes('status') ? status : control };
   const video = { paused: false, ended: false, currentTime: 10, duration: 1000, playbackRate: 1,
@@ -17,8 +17,8 @@ async function fixture() {
   };
   const playerDoc = { querySelector: s => s === 'video' ? video : null, querySelectorAll: () => [], addEventListener: (type, fn) => { listeners[type] = fn; } };
   const frame = { contentDocument: playerDoc, scrollIntoView() {} };
-  const window = { setInterval() {} }; window.top = window;
-  const context = { window, document: doc, location: { pathname: '/mycourse/studentstudy', search: '?courseId=1' },
+  const window = { setInterval() {}, setTimeout, clearTimeout }; window.top = window;
+  const context = { Date: class extends Date { static now() { return now; } }, window, document: doc, location: { pathname: '/mycourse/studentstudy', search: '?courseId=1' },
     sessionStorage: { getItem: () => 'tab', setItem() {} }, URLSearchParams,
     chrome: { runtime: { id: 'test' }, storage: { local: { get: async () => ({}), set: async () => {} }, onChanged: { addListener() {} } } },
   };
@@ -28,7 +28,7 @@ async function fixture() {
   context.test.start();
   const step = () => context.test.handleVideo({}, frame, 'video');
   await step();
-  return { step, video, doc, status, listeners, running: context.test.running, plays: () => plays, popup: () => { popup = true; } };
+  return { advance: ms => { now += ms; }, step, video, doc, status, listeners, running: context.test.running, plays: () => plays, popup: () => { popup = true; } };
 }
 test('后台意外暂停会正常续播，但每个视频最多恢复两次', async () => {
   const f = await fixture();
@@ -60,4 +60,43 @@ test('浏览器拒绝续播时暂停，不无限重试', async () => {
   f.video.play = async () => { rejected++; throw new Error('NotAllowedError'); };
   f.video.paused = true; await f.step();
   assert.equal(rejected, 1); assert.equal(f.running(), false);
+});
+
+
+test('播放中停滞先尝试一次原速续播，仍无进度才停止', async () => {
+  const f = await fixture();
+  f.video.playbackRate = 2;
+  f.advance(91000); await f.step();
+  assert.equal(f.running(), true);
+  assert.equal(f.plays(), 1);
+  assert.equal(f.video.currentTime, 10);
+  assert.equal(f.video.playbackRate, 1);
+  f.advance(91000); await f.step();
+  assert.equal(f.running(), false);
+  assert.equal(f.plays(), 1);
+});
+test('停滞遇到弹窗或媒体错误不执行恢复', async () => {
+  for (const scenario of ['popup', 'error']) {
+    const f = await fixture();
+    if (scenario === 'popup') f.popup();
+    else f.video.error = { code: 2 };
+    f.advance(91000); await f.step();
+    assert.equal(f.plays(), 0);
+    assert.equal(f.running(), false);
+  }
+});
+
+test('停滞恢复后进度增长可继续运行', async () => {
+  const f = await fixture();
+  f.advance(91000); await f.step();
+  f.video.currentTime = 15; f.advance(3000); await f.step();
+  assert.equal(f.running(), true);
+  assert.match(f.status.textContent, /正在以 1.0 倍速/);
+});
+test('停滞续播被拒绝时停止', async () => {
+  const f = await fixture();
+  f.video.play = async () => { throw new Error('NotAllowedError'); };
+  f.advance(91000); await f.step();
+  assert.equal(f.running(), false);
+  assert.match(f.status.textContent, /续播失败/);
 });

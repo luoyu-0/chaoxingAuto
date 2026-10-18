@@ -52,6 +52,7 @@
   let playRequestedAt = 0;
   let hasPlayed = false;
   let backgroundResumes = 0;
+  let stallRecovered = false;
   let manualPauseRequested = false;
   const watchedPlayers = new WeakSet();
   let endedAt = 0;
@@ -213,6 +214,7 @@
     playRequestedAt = 0;
     hasPlayed = false;
     backgroundResumes = 0;
+    stallRecovered = false;
     manualPauseRequested = false;
     endedAt = 0;
     rateAttemptedAt = 0;
@@ -225,8 +227,14 @@
   }
 
   function taskFinished(container) {
+    const icon = container.querySelector('.ans-job-icon');
+    const attachment = container.querySelector('iframe[jobid]');
+    // 网站把完成标记写到课件直接父节点，可能与外层附件容器不同。
     return container.classList.contains('ans-job-finished') ||
-      container.querySelector('.ans-job-icon')?.getAttribute('aria-label') === '任务点已完成';
+      attachment?.parentElement?.classList?.contains('ans-job-finished') ||
+      icon?.parentElement?.classList?.contains('ans-job-finished') ||
+      icon?.getAttribute('aria-label') === '任务点已完成' ||
+      (icon?.textContent || '').replace(/\s+/g, '') === '任务点已完成';
   }
 
   function questionKey(quiz, frame) {
@@ -483,7 +491,32 @@
       lastProgress = video.currentTime;
       lastProgressAt = Date.now();
     } else if (Date.now() - lastProgressAt > STALL_TIMEOUT_MS) {
-      await stop('视频长时间没有进度，已暂停。');
+      const popup = allDocuments().some(doc => [...doc.querySelectorAll('[role="dialog"],.layui-layer,.modal,.popup,.vjs-modal-dialog,#workpop,#verifyCodeWin')].some(visible));
+      if (chrome.runtime?.sendMessage) {
+        void send('recordVideoStall', { currentTime: video.currentTime, readyState: video.readyState, networkState: video.networkState, mediaError: video.error?.code || 0, hidden: document.visibilityState === 'hidden', recovered: stallRecovered }).catch(() => {});
+      }
+      if (!stallRecovered && !manualPauseRequested && !video.error && !popup && !allDocuments().some(riskIn)) {
+        stallRecovered = true;
+        rateChecked = true;
+        video.playbackRate = 1;
+        video.pause();
+        let timeout;
+        try {
+          await Promise.race([
+            video.play().then(() => { if (!running) video.pause(); }),
+            new Promise((_, reject) => { timeout = window.setTimeout(() => reject(new Error('续播超时')), 12000); }),
+          ]);
+          if (!running) { video.pause(); return; }
+          lastProgressAt = Date.now();
+          lastProgress = video.currentTime;
+          show('视频进度停滞，已尝试原速续播，等待进度恢复…');
+          return;
+        } catch {
+          await stop('视频停滞后续播失败，请检查网络或播放器提示。');
+          return;
+        } finally { window.clearTimeout(timeout); }
+      }
+      await stop(stallRecovered ? '视频尝试原速续播后仍长时间没有进度，已暂停。' : '视频长时间没有进度，已暂停。');
       return;
     }
     const duration = Number.isFinite(video.duration) ? ` / ${Math.round(video.duration)} 秒` : '';
@@ -662,7 +695,10 @@
         return;
       }
       if ([...card.querySelectorAll('.ans-job-icon[aria-label="任务点未完成"]')]
-        .some(icon => !skippedTests.has(icon.closest('.ans-attach-ct')))) {
+        .some(icon => {
+          const container = icon.closest('.ans-attach-ct');
+          return !skippedTests.has(container) && (!container || !taskFinished(container));
+        })) {
         await stop('当前内容还有未识别的任务点，已暂停。');
         return;
       }

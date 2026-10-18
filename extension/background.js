@@ -17,9 +17,9 @@ function appendLog(entry) {
   return logOperation(async () => {
     const stored = (await chrome.storage.local.get(LOG_KEY))[LOG_KEY];
     const logs = Array.isArray(stored) ? stored : [];
-    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.5' };
-    for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens']) {
-      if (entry[key] !== undefined) safe[key] = typeof entry[key] === 'number' ? entry[key] : cleanLogText(entry[key]);
+    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.7' };
+    for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens', 'currentTime', 'readyState', 'networkState', 'mediaError', 'hidden', 'recovered']) {
+      if (entry[key] !== undefined) safe[key] = ['number', 'boolean'].includes(typeof entry[key]) ? entry[key] : cleanLogText(entry[key]);
     }
     await chrome.storage.local.set({ [LOG_KEY]: [...logs, safe].slice(-500) });
   });
@@ -66,6 +66,16 @@ async function dispatch(message, sender) {
   }
   if (message.type === 'recordPause') {
     await appendLog({ event: 'assistant_paused', reason: message.reason });
+    return {};
+  }
+  if (message.type === 'recordVideoStall') {
+    const entry = { event: 'video_stalled' };
+    for (const key of ['currentTime', 'readyState', 'networkState', 'mediaError']) {
+      if (Number.isFinite(message[key])) entry[key] = message[key];
+    }
+    entry.hidden = !!message.hidden;
+    entry.recovered = !!message.recovered;
+    await appendLog(entry);
     return {};
   }
   if (message.type === 'openSettings') { await chrome.runtime.openOptionsPage(); return {}; }

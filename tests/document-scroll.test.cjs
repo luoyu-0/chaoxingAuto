@@ -17,9 +17,17 @@ async function main() {
     chrome: { storage: { local: { get: async () => ({}) }, onChanged: { addListener() {} } } },
   };
   const source = fs.readFileSync(path.join(__dirname, '../extension/course.js'), 'utf8')
-    .replace(/\n\}\)\(\);\s*$/, '\n globalThis.test = { handleDocument, current: () => currentTask };\n})();');
+    .replace(/\n\}\)\(\);\s*$/, '\n globalThis.test = { taskFinished, handleDocument, current: () => currentTask };\n})();');
   vm.runInNewContext(source, context);
   await Promise.resolve();
+  const completedParent = { classList: { contains: name => name === 'ans-job-finished' } };
+  const nested = { classList: { contains: () => false }, querySelector: s => s === 'iframe[jobid]' ? { parentElement: completedParent } : null };
+  assert.equal(context.test.taskFinished(nested), true, '应识别当前课件直接父节点的完成标记');
+  const textMarker = { getAttribute: () => '任务点未完成', textContent: ' 任务点已完成 ', parentElement: { classList: { contains: () => false } } };
+  const textContainer = { classList: { contains: () => false }, querySelector: s => s === '.ans-job-icon' ? textMarker : null };
+  assert.equal(context.test.taskFinished(textContainer), true, '完成文字应兼容未同步的 aria-label');
+  textMarker.textContent = '任务点';
+  assert.equal(context.test.taskFinished(textContainer), false, '未完成任务不能因文档到底就放行');
   let finished = false;
   let scrolls = 0;
   const viewport = {
