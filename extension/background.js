@@ -2,6 +2,8 @@
 importScripts('model-api.js');
 const CONFIG = 'modelConfig';
 const SECRET = 'modelSecret';
+const OWNER_KEY = 'courseAssistantRunning';
+const WAKE_ALARM = 'courseAssistantWake';
 const active = new Map();
 const LOG_KEY = 'diagnosticLogs';
 let logQueue = Promise.resolve();
@@ -17,7 +19,7 @@ function appendLog(entry) {
   return logOperation(async () => {
     const stored = (await chrome.storage.local.get(LOG_KEY))[LOG_KEY];
     const logs = Array.isArray(stored) ? stored : [];
-    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.8' };
+    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.9' };
     for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens', 'currentTime', 'readyState', 'networkState', 'mediaError', 'hidden', 'recovered']) {
       if (entry[key] !== undefined) safe[key] = ['number', 'boolean'].includes(typeof entry[key]) ? entry[key] : cleanLogText(entry[key]);
     }
@@ -28,6 +30,24 @@ const ready = Promise.all([
   chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
   chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }),
 ]);
+async function syncWakeAlarm(owner) {
+  if (owner?.browserTabId !== undefined) {
+    if (!await chrome.alarms.get(WAKE_ALARM)) await chrome.alarms.create(WAKE_ALARM, { periodInMinutes: 0.5 });
+  } else {
+    await chrome.alarms.clear(WAKE_ALARM);
+  }
+}
+// 服务工作线程重启后，恢复仍在运行的课程唤醒计划。
+void ready.then(async () => syncWakeAlarm((await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY])).catch(() => {});
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name !== WAKE_ALARM) return;
+  void ready.then(async () => {
+    const owner = (await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY];
+    if (!owner?.browserTabId && owner?.browserTabId !== 0) { await syncWakeAlarm(null); return; }
+    try { await chrome.tabs.sendMessage(owner.browserTabId, { type: 'wakeCourse', tabId: owner.tabId }); }
+    catch { /* 页面可能正在导航；下次唤醒再检查。 */ }
+  }).catch(() => {});
+});
 
 async function config() {
   const data = await chrome.storage.local.get(CONFIG);
@@ -52,8 +72,11 @@ async function dispatch(message, sender) {
   await ready;
   const fromSettings = settingsSender(sender);
   if (message.type === 'clearOwner' && sender.id === chrome.runtime.id && sender.tab) {
-    const owner = (await chrome.storage.local.get('courseAssistantRunning')).courseAssistantRunning;
-    if (owner?.browserTabId === sender.tab.id) await chrome.storage.local.set({ courseAssistantRunning: null });
+    const owner = (await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY];
+    if (owner?.browserTabId === sender.tab.id) {
+      await chrome.storage.local.set({ [OWNER_KEY]: null });
+      await syncWakeAlarm(null);
+    }
     return {};
   }
   if (!fromSettings && !courseSender(sender)) throw new Error('不支持的调用页面');
@@ -125,7 +148,7 @@ async function dispatch(message, sender) {
     if (fromSettings) throw new Error('请从课程页发起答题');
     const c = await config();
     if (c.skipTests || c.mode === 'pause') throw new Error('当前设置未开启模型答题');
-    const owner = (await chrome.storage.local.get('courseAssistantRunning')).courseAssistantRunning;
+    const owner = (await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY];
     if (owner?.browserTabId !== sender.tab.id) throw new Error('当前标签页未运行课程助手');
     const qs = CourseModel.questions(message.questions);
     if (qs.length > 10 || JSON.stringify(qs).length > 100000) throw new Error('单批题目过多');
@@ -139,9 +162,11 @@ async function dispatch(message, sender) {
     return promise;
   }
   // 课程运行状态通过后台代理，避免内容脚本直接访问含密钥的存储区。
-  if (message.type === 'getOwner') return (await chrome.storage.local.get('courseAssistantRunning')).courseAssistantRunning || null;
+  if (message.type === 'getOwner') return (await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY] || null;
   if (message.type === 'setOwner') {
-    await chrome.storage.local.set({ courseAssistantRunning: message.owner ? { ...message.owner, browserTabId: sender.tab.id } : null });
+    const owner = message.owner ? { ...message.owner, browserTabId: sender.tab.id } : null;
+    await chrome.storage.local.set({ [OWNER_KEY]: owner });
+    await syncWakeAlarm(owner);
     return {};
   }
   throw new Error('未知扩展请求');
@@ -162,4 +187,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   dispatch(message, sender).then(data => reply({ ok: true, data }), error => reply({ ok: false, error: error.message || '扩展请求失败' }));
   return true;
 });
-chrome.tabs.onRemoved.addListener(tabId => active.get(tabId)?.controller.abort());
+chrome.tabs.onRemoved.addListener(tabId => {
+  active.get(tabId)?.controller.abort();
+  void ready.then(async () => {
+    const owner = (await chrome.storage.local.get(OWNER_KEY))[OWNER_KEY];
+    if (owner?.browserTabId !== tabId) return;
+    await chrome.storage.local.set({ [OWNER_KEY]: null });
+    await syncWakeAlarm(null);
+  }).catch(() => {});
+});

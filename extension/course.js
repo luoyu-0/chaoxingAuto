@@ -740,6 +740,14 @@
   });
 
   intervalId = window.setInterval(() => void tick(), INTERVAL_MS);
+  // 后台标签页的定时器可能被延后；扩展后台的 alarm 到时主动唤醒当前页。
+  chrome.runtime?.onMessage?.addListener((message, sender) => {
+    if (sender.id === chrome.runtime.id && message?.type === 'wakeCourse' &&
+        message.tabId === tabId && running) void tick();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (running && document.visibilityState === 'visible') void tick();
+  });
   try {
     chrome.storage.onChanged.addListener(changes => {
       if (!running || !changes[STORAGE_KEY]) return;
