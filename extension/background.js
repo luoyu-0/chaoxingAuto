@@ -19,7 +19,7 @@ function appendLog(entry) {
   return logOperation(async () => {
     const stored = (await chrome.storage.local.get(LOG_KEY))[LOG_KEY];
     const logs = Array.isArray(stored) ? stored : [];
-    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.9' };
+    const safe = { time: new Date().toISOString(), event: cleanLogText(entry.event), version: '0.4.10' };
     for (const key of ['reason', 'attempt', 'questionCount', 'status', 'contentLength', 'reasoningLength', 'completionTokens', 'currentTime', 'readyState', 'networkState', 'mediaError', 'hidden', 'recovered']) {
       if (entry[key] !== undefined) safe[key] = ['number', 'boolean'].includes(typeof entry[key]) ? entry[key] : cleanLogText(entry[key]);
     }

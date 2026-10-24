@@ -5,11 +5,11 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 async function fixture() {
-  let plays = 0, popup = false, now = 1000;
+  let plays = 0, pauses = 0, popup = false, now = 1000;
   const listeners = {}, status = {}, control = { addEventListener() {} };
   const box = { style: {}, querySelector: s => s.includes('status') ? status : control };
   const video = { paused: false, ended: false, currentTime: 10, duration: 1000, playbackRate: 1,
-    play: async () => { plays++; video.paused = false; }, pause: () => { video.paused = true; } };
+    play: async () => { plays++; video.paused = false; }, pause: () => { pauses++; video.paused = true; } };
   const doc = { title: '', body: null, visibilityState: 'hidden', hasFocus: () => false,
     createElement: () => box, documentElement: { appendChild() {} }, addEventListener() {}, querySelector: () => null,
     defaultView: { getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
@@ -28,7 +28,7 @@ async function fixture() {
   context.test.start();
   const step = () => context.test.handleVideo({}, frame, 'video');
   await step();
-  return { advance: ms => { now += ms; }, step, video, doc, status, listeners, running: context.test.running, plays: () => plays, popup: () => { popup = true; } };
+  return { advance: ms => { now += ms; }, step, video, doc, status, listeners, running: context.test.running, plays: () => plays, pauses: () => pauses, popup: () => { popup = true; } };
 }
 test('后台意外暂停会正常续播，但每个视频最多恢复两次', async () => {
   const f = await fixture();
@@ -95,8 +95,34 @@ test('停滞恢复后进度增长可继续运行', async () => {
 });
 test('停滞续播被拒绝时停止', async () => {
   const f = await fixture();
-  f.video.play = async () => { throw new Error('NotAllowedError'); };
+  f.video.play = async () => { f.video.paused = true; throw new Error('NotAllowedError'); };
   f.advance(91000); await f.step();
   assert.equal(f.running(), false);
   assert.match(f.status.textContent, /续播失败/);
+});
+
+test('播放中的视频卡顿时，续播调用被拒绝也不应由助手主动暂停视频', async () => {
+  const f = await fixture();
+  f.video.play = async () => { throw new Error('AbortError'); };
+  f.advance(91000); await f.step();
+  assert.equal(f.pauses(), 0);
+  assert.equal(f.video.paused, false);
+  assert.equal(f.running(), true);
+});
+
+test('后台视频仍在加载数据时等待缓冲，不主动暂停或重复发起播放', async () => {
+  const f = await fixture();
+  f.video.readyState = 2;
+  f.video.networkState = 2;
+  f.video.playbackRate = 2;
+  f.advance(91000); await f.step();
+  assert.equal(f.pauses(), 0);
+  assert.equal(f.plays(), 0);
+  assert.equal(f.video.playbackRate, 1);
+  assert.equal(f.running(), true);
+  assert.match(f.status.textContent, /缓冲/);
+  f.advance(600000); await f.step();
+  assert.equal(f.running(), true);
+  f.video.currentTime = 15; await f.step();
+  assert.match(f.status.textContent, /正在以/);
 });

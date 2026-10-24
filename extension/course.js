@@ -53,6 +53,7 @@
   let hasPlayed = false;
   let backgroundResumes = 0;
   let stallRecovered = false;
+  let stallReported = false;
   let documentWaitReported = false;
   let manualPauseRequested = false;
   const watchedPlayers = new WeakSet();
@@ -216,6 +217,7 @@
     hasPlayed = false;
     backgroundResumes = 0;
     stallRecovered = false;
+    stallReported = false;
     documentWaitReported = false;
     manualPauseRequested = false;
     endedAt = 0;
@@ -432,6 +434,7 @@
       playRequestedAt = 0;
       lastProgress = video.currentTime;
       lastProgressAt = Date.now();
+      stallReported = false;
     }
     if (video.ended) {
       endedAt ||= Date.now();
@@ -489,19 +492,27 @@
     if (video.currentTime + 2 < lastProgress) {
       lastProgress = video.currentTime;
       lastProgressAt = Date.now();
+      stallReported = false;
     } else if (video.currentTime > lastProgress + 0.2) {
       lastProgress = video.currentTime;
       lastProgressAt = Date.now();
+      stallReported = false;
     } else if (Date.now() - lastProgressAt > STALL_TIMEOUT_MS) {
       const popup = allDocuments().some(doc => [...doc.querySelectorAll('[role="dialog"],.layui-layer,.modal,.popup,.vjs-modal-dialog,#workpop,#verifyCodeWin')].some(visible));
-      if (chrome.runtime?.sendMessage) {
+      if (!stallReported && chrome.runtime?.sendMessage) {
         void send('recordVideoStall', { currentTime: video.currentTime, readyState: video.readyState, networkState: video.networkState, mediaError: video.error?.code || 0, hidden: document.visibilityState === 'hidden', recovered: stallRecovered }).catch(() => {});
+        stallReported = true;
+      }
+      if (document.visibilityState === 'hidden' && video.readyState < 3 && video.networkState === 2 && !video.error && !popup) {
+        rateChecked = true;
+        video.playbackRate = 1;
+        show('后台视频正在缓冲，已切回原速等待加载…');
+        return;
       }
       if (!stallRecovered && !manualPauseRequested && !video.error && !popup && !allDocuments().some(riskIn)) {
         stallRecovered = true;
         rateChecked = true;
         video.playbackRate = 1;
-        video.pause();
         let timeout;
         try {
           await Promise.race([
@@ -514,6 +525,12 @@
           show('视频进度停滞，已尝试原速续播，等待进度恢复…');
           return;
         } catch {
+          if (!video.paused) {
+            lastProgressAt = Date.now();
+            lastProgress = video.currentTime;
+            show('视频仍在播放，等待进度恢复…');
+            return;
+          }
           await stop('视频停滞后续播失败，请检查网络或播放器提示。');
           return;
         } finally { window.clearTimeout(timeout); }
